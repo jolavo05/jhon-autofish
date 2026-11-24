@@ -1,0 +1,6 @@
+# Configuração local (área da caixinha, ajustes) - criada ao rodar
+config.json
+debug.png
+__pycache__/
+*.pyc
+.venv/

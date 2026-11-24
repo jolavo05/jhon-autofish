@@ -1,5 +1,5 @@
 """
-GPO Autofish - macro de pesca por leitura de tela (sem mexer na memória do jogo).
+Jhon autofish - macro de pesca para o GPO por leitura de tela (sem mexer na memória do jogo).
 
 Teclas (padrão, mude em config.json):
   F6  liga/desliga o loop de pesca
@@ -21,6 +21,8 @@ import random
 import threading
 import time
 import tkinter as tk
+
+import customtkinter as ctk
 
 # Precisa vir antes de criar qualquer janela: coordenadas reais em telas com escala
 try:
@@ -307,12 +309,12 @@ class AreaSelector:
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
         self.win.attributes("-alpha", 0.45)
-        self.win.configure(bg="#1fa3a3", highlightthickness=2, highlightbackground="#2ee6d6")
+        self.win.configure(bg="#1e3a8a", highlightthickness=3, highlightbackground="#e3893f")
 
-        self.info = tk.Label(self.win, bg="#0d3b4a", fg="white", font=("Segoe UI", 9),
+        self.info = tk.Label(self.win, bg="#0b0c10", fg="#e3893f", font=("Segoe UI", 9),
                              justify="left")
         self.info.pack(fill="x")
-        btns = tk.Frame(self.win, bg="#1fa3a3")
+        btns = tk.Frame(self.win, bg="#1e3a8a")
         btns.pack(side="bottom", fill="x", pady=4)
         tk.Button(btns, text="Salvar (Enter)", command=self.save).pack(side="left", expand=True)
         tk.Button(btns, text="Cancelar (Esc)", command=self.cancel).pack(side="left", expand=True)
@@ -638,15 +640,37 @@ class Macro(threading.Thread):
 
 
 # ---------------------------------------------------------------- janela
+APP_NAME = "Jhon autofish"
+
+# paleta: preto escuro + azul escuro + laranja escuro
+BG = "#0b0c10"
+CARD = "#14161c"
+CARD_IN = "#1b1e26"
+BORDER = "#252a36"
+BLUE = "#1e3a8a"
+BLUE_HOVER = "#2647a8"
+BLUE_TXT = "#6b93f0"
+ORANGE = "#b4561c"
+ORANGE_HOVER = "#cc6a2a"
+ORANGE_TXT = "#e3893f"
+TEXT = "#e8e8ea"
+MUTED = "#8b909c"
+RED = "#8f2a2a"
+RED_HOVER = "#a83636"
+
+
 class App:
     def __init__(self):
         self.cfg = load_config()
         self.jobs = queue.Queue()
-        self.marking = None  # índice do passo do assistente de botões
-        self.root = tk.Tk()
-        self.root.title("GPO Autofish")
+        self.marking = None  # índice do passo do assistente de posições
+        self.fields = {}
+        ctk.set_appearance_mode("dark")
+        self.root = ctk.CTk(fg_color=BG)
+        self.root.title(APP_NAME)
         self.root.attributes("-topmost", True)
-        self.root.resizable(False, False)
+        self.root.geometry("600x760")
+        self.root.minsize(560, 600)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.build()
         self.macro = Macro(self)
@@ -655,79 +679,190 @@ class App:
         if self.cfg["area"] is None:
             self.log("Abra o minigame e aperte F7 pra marcar a barra.")
 
-    def build(self):
-        pad = {"padx": 10, "pady": 3}
-        tk.Label(self.root, text="GPO Autofish", font=("Segoe UI", 14, "bold")).pack(**pad)
-        self.status_var = tk.StringVar(value="Desligado")
-        tk.Label(self.root, textvariable=self.status_var, fg="#1a73e8").pack(**pad)
-        self.count_var = tk.StringVar(value="Peixes: 0")
-        tk.Label(self.root, textvariable=self.count_var).pack(**pad)
+    # ------------------------------------------------ peças visuais
+    def font(self, size=13, weight="normal"):
+        return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
 
-        row = tk.Frame(self.root)
-        row.pack(**pad)
-        tk.Button(row, text="Ligar/Desligar (F6)", width=18,
-                  command=lambda: self.macro.set_running(not self.macro.running)).pack(side="left", padx=2)
-        tk.Button(row, text="Definir área (F7)", width=18,
-                  command=self.open_selector).pack(side="left", padx=2)
+    def card(self, parent, title=None, accent=ORANGE_TXT):
+        f = ctk.CTkFrame(parent, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=12)
+        if title:
+            ctk.CTkLabel(f, text=title, text_color=accent, font=self.font(14, "bold"),
+                         anchor="w").pack(fill="x", padx=16, pady=(12, 6))
+        return f
 
-        pd = tk.LabelFrame(self.root, text="Controlador PD")
-        pd.pack(fill="x", **pad)
-        self.kp = self.spin(pd, "Kp", "kp", 0, 0.1)
-        self.kd = self.spin(pd, "Kd", "kd", 1, 0.01)
+    def button(self, parent, text, command, color="blue", width=150):
+        fg, hover = {"blue": (BLUE, BLUE_HOVER), "orange": (ORANGE, ORANGE_HOVER),
+                     "dark": (CARD_IN, BORDER), "red": (RED, RED_HOVER)}[color]
+        return ctk.CTkButton(parent, text=text, command=command, fg_color=fg, hover_color=hover,
+                             text_color=TEXT, corner_radius=8, height=34, width=width,
+                             font=self.font(13, "bold"))
 
-        tm = tk.LabelFrame(self.root, text="Tempos (s)")
-        tm.pack(fill="x", **pad)
-        self.spin(tm, "Segurar p/ lançar", "cast_hold_s", 0, 0.05)
-        self.spin(tm, "Timeout esperando", "scan_timeout_s", 1, 0.5)
-        self.spin(tm, "Espera depois", "wait_after_s", 2, 0.1)
+    def switch(self, parent, text, var):
+        return ctk.CTkSwitch(parent, text=text, variable=var, command=self.save_fields,
+                             progress_color=ORANGE, button_color="#d9d9d9",
+                             button_hover_color="#ffffff", fg_color=BORDER,
+                             text_color=TEXT, font=self.font(13))
 
-        self.inv = tk.BooleanVar(value=self.cfg["invert"])
-        tk.Checkbutton(self.root, text="Inverter (segurar faz a zona descer)", variable=self.inv,
-                       command=self.save_fields).pack(anchor="w", padx=10)
-
-        bait = tk.LabelFrame(self.root, text="Iscas comuns")
-        bait.pack(fill="x", **pad)
-        self.auto_buy = tk.BooleanVar(value=self.cfg["auto_buy"])
-        tk.Checkbutton(bait, text="Comprar automaticamente", variable=self.auto_buy,
-                       command=self.save_fields).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.spin(bait, "Iscas que tenho agora", "bait_count", 1, 1, integer=True, top=1000)
-        self.spin(bait, "Comprar quando restar", "buy_at", 2, 1, integer=True)
-        self.spin(bait, "Máximo (cap)", "bait_cap", 3, 1, integer=True, top=1000)
-        brow = tk.Frame(bait)
-        brow.grid(row=4, column=0, columnspan=2, pady=3)
-        self.mark_btn = tk.Button(brow, text="Marcar botões", width=14,
-                                  command=lambda: self.start_marking(self.MARK_STEPS))
-        self.mark_btn.pack(side="left", padx=2)
-        tk.Button(brow, text="Comprar agora", width=14,
-                  command=lambda: setattr(self.macro, "buy_requested", True)).pack(side="left", padx=2)
-
-        sw = tk.LabelFrame(self.root, text="Troca de iscas (lendária → rara → comum)")
-        sw.pack(fill="x", **pad)
-        self.spin(sw, "Lendárias", "legendary_count", 0, 1, integer=True, top=1000)
-        self.spin(sw, "Raras", "rare_count", 1, 1, integer=True, top=1000)
-        tk.Label(sw, text="Usando agora no jogo").grid(row=2, column=0, sticky="w", padx=6)
-        self.active_var = tk.StringVar(value=BAIT_NAMES.get(self.cfg["active_bait"], "Comum"))
-        tk.OptionMenu(sw, self.active_var, *BAIT_NAMES.values(),
-                      command=lambda _: self.save_fields()).grid(row=2, column=1, padx=6, pady=2)
-        self.mark_bait_btn = tk.Button(sw, text="Marcar iscas", width=14,
-                                       command=lambda: self.start_marking(self.BAIT_STEPS))
-        self.mark_bait_btn.grid(row=3, column=0, columnspan=2, pady=3)
-
-        tk.Button(self.root, text="Testar detecção (F8)", command=self.debug).pack(**pad)
-        self.text = tk.Text(self.root, height=8, width=60, font=("Consolas", 8), state="disabled")
-        self.text.pack(padx=10, pady=(3, 10))
-
-    def spin(self, parent, label, key, r, step, integer=False, top=100):
-        tk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=6)
+    def number(self, parent, label, key, step, integer=False, top=100):
+        """Linha 'rótulo ......  [-] valor [+]'."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=3)
+        ctk.CTkLabel(row, text=label, text_color=TEXT, font=self.font(13)).pack(side="left")
         var = tk.IntVar(value=int(self.cfg[key])) if integer else tk.DoubleVar(value=self.cfg[key])
-        sb = tk.Spinbox(parent, from_=0, to=top, increment=step, textvariable=var, width=8,
-                        command=self.save_fields)
-        sb.grid(row=r, column=1, padx=6, pady=2)
-        sb.bind("<FocusOut>", lambda e: self.save_fields())
-        sb.bind("<Return>", lambda e: self.save_fields())
-        self.fields = getattr(self, "fields", {})
+
+        def bump(d):
+            try:
+                v = min(max(var.get() + d, 0), top)
+            except tk.TclError:
+                v = 0
+            var.set(int(v) if integer else round(v, 3))
+            self.save_fields()
+
+        box = ctk.CTkFrame(row, fg_color="transparent")
+        box.pack(side="right")
+        mk = dict(width=28, height=28, corner_radius=6, fg_color=CARD_IN, hover_color=BORDER,
+                  text_color=ORANGE_TXT, font=self.font(14, "bold"))
+        ctk.CTkButton(box, text="−", command=lambda: bump(-step), **mk).pack(side="left")
+        e = ctk.CTkEntry(box, textvariable=var, width=70, height=28, justify="center",
+                         fg_color=CARD_IN, border_color=BORDER, text_color=TEXT, font=self.font(13))
+        e.pack(side="left", padx=4)
+        e.bind("<FocusOut>", lambda ev: self.save_fields())
+        e.bind("<Return>", lambda ev: self.save_fields())
+        ctk.CTkButton(box, text="+", command=lambda: bump(step), **mk).pack(side="left")
         self.fields[key] = var
         return var
+
+    # ------------------------------------------------ layout
+    def build(self):
+        # cabeçalho
+        head = ctk.CTkFrame(self.root, fg_color="transparent")
+        head.pack(fill="x", padx=22, pady=(18, 6))
+        left = ctk.CTkFrame(head, fg_color="transparent")
+        left.pack(side="left")
+        title = ctk.CTkFrame(left, fg_color="transparent")
+        title.pack(anchor="w")
+        ctk.CTkLabel(title, text="Jhon", text_color=TEXT, font=self.font(26, "bold")).pack(side="left")
+        ctk.CTkLabel(title, text=" autofish", text_color=ORANGE_TXT,
+                     font=self.font(26, "bold")).pack(side="left")
+        ctk.CTkLabel(left, text="Pesca automática pro GPO  ·  F7 ajusta a área da barra",
+                     text_color=MUTED, font=self.font(12)).pack(anchor="w")
+        self.count_var = tk.StringVar(value="Peixes: 0")
+        ctk.CTkLabel(head, textvariable=self.count_var, text_color=BLUE_TXT,
+                     font=self.font(15, "bold")).pack(side="right", anchor="n", pady=8)
+
+        # cartão de status
+        st = self.card(self.root)
+        st.pack(fill="x", padx=18, pady=6)
+        top = ctk.CTkFrame(st, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(12, 4))
+        self.dot = ctk.CTkLabel(top, text="●", text_color=MUTED, font=self.font(18))
+        self.dot.pack(side="left")
+        self.status_var = tk.StringVar(value="Desligado")
+        ctk.CTkLabel(top, textvariable=self.status_var, text_color=TEXT,
+                     font=self.font(17, "bold")).pack(side="left", padx=8)
+        btns = ctk.CTkFrame(st, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(4, 14))
+        self.start_btn = self.button(btns, "▶  Ligar  (F6)",
+                                     lambda: self.macro.set_running(not self.macro.running),
+                                     "orange", 170)
+        self.start_btn.pack(side="left")
+        self.button(btns, "Definir área  (F7)", self.open_selector, "blue", 160).pack(side="left", padx=8)
+        self.button(btns, "Testar  (F8)", self.debug, "dark", 120).pack(side="left")
+
+        # abas
+        tabs = ctk.CTkTabview(self.root, fg_color=CARD, border_color=BORDER, border_width=1,
+                              corner_radius=12, segmented_button_fg_color=CARD_IN,
+                              segmented_button_selected_color=ORANGE,
+                              segmented_button_selected_hover_color=ORANGE_HOVER,
+                              segmented_button_unselected_color=CARD_IN,
+                              segmented_button_unselected_hover_color=BORDER,
+                              text_color=TEXT, height=360)
+        tabs.pack(fill="both", expand=True, padx=18, pady=6)
+        main = ctk.CTkScrollableFrame(tabs.add("Principal"), fg_color="transparent",
+                                      scrollbar_button_color=BORDER, scrollbar_button_hover_color=ORANGE)
+        main.pack(fill="both", expand=True)
+        adv = ctk.CTkScrollableFrame(tabs.add("Avançado"), fg_color="transparent",
+                                     scrollbar_button_color=BORDER, scrollbar_button_hover_color=ORANGE)
+        adv.pack(fill="both", expand=True)
+
+        # --- Principal
+        ctk.CTkLabel(main, text="ORDEM DAS TAREFAS", text_color=ORANGE_TXT,
+                     font=self.font(11, "bold"), anchor="w").pack(fill="x", padx=6, pady=(2, 4))
+
+        buy = self.card(main, "1 · Comprar iscas comuns")
+        buy.pack(fill="x", padx=4, pady=5)
+        self.auto_buy = tk.BooleanVar(value=self.cfg["auto_buy"])
+        self.switch(buy, "Comprar automaticamente", self.auto_buy).pack(anchor="w", padx=16, pady=(0, 6))
+        self.number(buy, "Iscas comuns que tenho", "bait_count", 1, integer=True, top=1000)
+        self.number(buy, "Comprar quando restar", "buy_at", 1, integer=True)
+        self.number(buy, "Máximo (cap)", "bait_cap", 1, integer=True, top=1000)
+        row = ctk.CTkFrame(buy, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(8, 14))
+        self.button(row, "Marcar botões", lambda: self.start_marking(self.MARK_STEPS),
+                    "blue", 150).pack(side="left")
+        self.button(row, "Comprar agora", lambda: setattr(self.macro, "buy_requested", True),
+                    "dark", 150).pack(side="left", padx=8)
+
+        sw = self.card(main, "2 · Troca de iscas", BLUE_TXT)
+        sw.pack(fill="x", padx=4, pady=5)
+        ctk.CTkLabel(sw, text="Usa na ordem: Lendária → Rara → Comum", text_color=MUTED,
+                     font=self.font(12), anchor="w").pack(fill="x", padx=16)
+        self.number(sw, "Lendárias", "legendary_count", 1, integer=True, top=1000)
+        self.number(sw, "Raras", "rare_count", 1, integer=True, top=1000)
+        ctk.CTkLabel(sw, text="Usando agora no jogo", text_color=TEXT, font=self.font(13),
+                     anchor="w").pack(fill="x", padx=16, pady=(6, 2))
+        self.active_var = tk.StringVar(value=BAIT_NAMES.get(self.cfg["active_bait"], "Comum"))
+        ctk.CTkSegmentedButton(sw, values=list(BAIT_NAMES.values()), variable=self.active_var,
+                               command=lambda _: self.save_fields(), fg_color=CARD_IN,
+                               selected_color=BLUE, selected_hover_color=BLUE_HOVER,
+                               unselected_color=CARD_IN, unselected_hover_color=BORDER,
+                               text_color=TEXT, font=self.font(13)).pack(fill="x", padx=16, pady=2)
+        self.button(sw, "Marcar linhas das iscas", lambda: self.start_marking(self.BAIT_STEPS),
+                    "blue", 200).pack(anchor="w", padx=16, pady=(8, 14))
+
+        keys = self.card(main, "Teclas de atalho")
+        keys.pack(fill="x", padx=4, pady=5)
+        for k, desc in (("F6", "Ligar / desligar"), ("F7", "Definir área / marcar posição"),
+                        ("F8", "Testar detecção"), ("F9", "Cor debaixo do mouse"), ("F10", "Fechar")):
+            r = ctk.CTkFrame(keys, fg_color="transparent")
+            r.pack(fill="x", padx=16, pady=2)
+            ctk.CTkLabel(r, text=k, width=54, height=26, fg_color=CARD_IN, corner_radius=6,
+                         text_color=ORANGE_TXT, font=self.font(12, "bold")).pack(side="left")
+            ctk.CTkLabel(r, text=desc, text_color=TEXT, font=self.font(13)).pack(side="left", padx=10)
+        ctk.CTkFrame(keys, height=8, fg_color="transparent").pack()
+
+        # --- Avançado
+        pd = self.card(adv, "Controlador PD", BLUE_TXT)
+        pd.pack(fill="x", padx=4, pady=5)
+        self.number(pd, "Kp (proporcional)", "kp", 0.1)
+        self.number(pd, "Kd (derivativo)", "kd", 0.01)
+        self.inv = tk.BooleanVar(value=self.cfg["invert"])
+        self.switch(pd, "Inverter (segurar faz a zona descer)", self.inv).pack(anchor="w", padx=16,
+                                                                               pady=(6, 14))
+        tm = self.card(adv, "Tempos (segundos)")
+        tm.pack(fill="x", padx=4, pady=5)
+        self.number(tm, "Segurar p/ lançar", "cast_hold_s", 0.05)
+        self.number(tm, "Timeout esperando peixe", "scan_timeout_s", 0.5)
+        self.number(tm, "Espera depois do peixe", "wait_after_s", 0.1)
+        self.number(tm, "Espera entre passos da compra", "buy_step_s", 0.1)
+        self.number(tm, "Espera ao trocar isca", "switch_step_s", 0.1)
+        ctk.CTkFrame(tm, height=8, fg_color="transparent").pack()
+
+        # log
+        lg = self.card(self.root)
+        lg.pack(fill="x", padx=18, pady=(6, 16))
+        self.text = ctk.CTkTextbox(lg, height=80, fg_color=CARD, text_color=MUTED,
+                                   font=ctk.CTkFont(family="Consolas", size=11), wrap="word")
+        self.text.pack(fill="x", padx=8, pady=8)
+        self.text.configure(state="disabled")
+        self.log("Pronto.")
+
+    def refresh_running(self):
+        on = self.macro.running
+        self.start_btn.configure(text="■  Desligar  (F6)" if on else "▶  Ligar  (F6)",
+                                 fg_color=RED if on else ORANGE,
+                                 hover_color=RED_HOVER if on else ORANGE_HOVER)
+        self.dot.configure(text_color=ORANGE_TXT if on else MUTED)
 
     def save_fields(self):
         for key, var in self.fields.items():
@@ -784,14 +919,17 @@ class App:
         self.root.after(30, self.pump)
 
     def status(self, s):
-        self.post(lambda: self.status_var.set(s))
+        def do():
+            self.status_var.set(s)
+            self.refresh_running()
+        self.post(do)
 
     def log(self, msg):
         def do():
-            self.text.config(state="normal")
+            self.text.configure(state="normal")
             self.text.insert("end", msg + "\n")
             self.text.see("end")
-            self.text.config(state="disabled")
+            self.text.configure(state="disabled")
         self.post(do)
         print(msg)
 

@@ -1,4 +1,4 @@
-# GPO Autofish
+# Jhon autofish
 
 Macro de pesca automática para o **Grand Piece Online** (Roblox).
 Funciona só lendo a tela e simulando o clique do mouse, sem mexer na memória do jogo.

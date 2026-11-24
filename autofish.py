@@ -61,6 +61,19 @@ DEFAULT_CONFIG = {
     "fish_white_min": 230,        # linha branca do peixe
     "min_bar_frac": 0.15,         # fração mínima da altura com azul-claro p/ considerar a barra visível
 
+    # Compra automática de iscas comuns
+    "auto_buy": False,
+    "bait_count": 0,          # quantas iscas comuns você tem agora (o script desconta 1 por peixe)
+    "bait_cap": 300,          # máximo que dá pra ter (MAX do jogo = cap - atual)
+    "buy_at": 3,              # compra quando restar isso ou menos
+    "pos_yes": None,          # posições marcadas no assistente
+    "pos_amount": None,
+    "pos_buy": None,
+    "pos_dots": None,         # botão "..." que fecha o diálogo depois da compra
+    "pos_fish": None,         # ponto onde o mouse fica pra pescar
+    "buy_step_s": 0.9,        # espera entre cada passo da compra
+    "interact_scan": 0x12,    # scan code da tecla E
+
     "window_title": "Roblox",
 
     # Virtual-key codes: F6=0x75 F7=0x76 F8=0x77 F9=0x78 F10=0x79
@@ -104,6 +117,43 @@ def key_pressed(vk):
     was = _pressed.get(vk, False)
     _pressed[vk] = down
     return down and not was
+
+
+KEYEVENTF_SCANCODE = 0x0008
+KEYEVENTF_KEYUP = 0x0002
+MOUSEEVENTF_MOVE = 0x0001
+# scan codes: 1-9 = 0x02-0x0A, 0 = 0x0B
+DIGIT_SCAN = {str(d): 0x02 + d - 1 for d in range(1, 10)} | {"0": 0x0B}
+SCAN_BACKSPACE = 0x0E
+
+
+def key_tap(scan, hold=0.05):
+    """Aperta uma tecla por scan code (o Roblox ignora teclas virtuais comuns)."""
+    user32.keybd_event(0, scan, KEYEVENTF_SCANCODE, 0)
+    time.sleep(hold)
+    user32.keybd_event(0, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0)
+    time.sleep(0.03)
+
+
+def type_number(n):
+    for ch in str(int(n)):
+        key_tap(DIGIT_SCAN[ch])
+
+
+def move_to(x, y):
+    """Coloca o mouse em (x, y). O Roblox só registra se o mouse 'mexer'."""
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    user32.mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0)
+    user32.mouse_event(MOUSEEVENTF_MOVE, -1, 0, 0, 0)
+    time.sleep(0.05)
+
+
+def click_at(x, y):
+    move_to(x, y)
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.06)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 class Mouse:
@@ -331,6 +381,7 @@ class Macro(threading.Thread):
         self.paused = False   # enquanto a caixinha está aberta
         self.caught = 0
         self.quit = False
+        self.buy_requested = False
 
     def set_running(self, on):
         if on and self.cfg["area"] is None:
@@ -347,7 +398,11 @@ class Macro(threading.Thread):
         if key_pressed(c["key_toggle"]):
             self.set_running(not self.running)
         if key_pressed(c["key_area"]):
-            self.app.post(self.app.open_selector)
+            if self.app.marking is not None:
+                pos = cursor_pos()
+                self.app.post(lambda: self.app.mark_next(pos))
+            else:
+                self.app.post(self.app.open_selector)
         if key_pressed(c["key_debug"]):
             self.app.post(self.app.debug)
         if key_pressed(c["key_color"]):
@@ -373,6 +428,8 @@ class Macro(threading.Thread):
 
     def cast(self):
         self.app.status("Lançando")
+        if self.cfg["pos_fish"]:
+            move_to(*self.cfg["pos_fish"])
         self.mouse.press()
         ok = self.sleep(self.cfg["cast_hold_s"] + random.uniform(0, 0.05))
         self.mouse.release()
@@ -386,6 +443,7 @@ class Macro(threading.Thread):
             if not self.active():
                 return False
             if self.vision.read()[0]:
+                self.use_bait()
                 return True
             time.sleep(0.03)
         self.app.log("Nada mordeu (timeout), relançando.")
@@ -431,9 +489,89 @@ class Macro(threading.Thread):
             self.caught += 1
             self.app.post(lambda: self.app.count_var.set(f"Peixes: {self.caught}"))
 
+    # --- iscas
+    def use_bait(self):
+        c = self.cfg
+        c["bait_count"] = max(int(c["bait_count"]) - 1, 0)
+        save_config(c)
+        self.app.post(lambda: self.app.fields["bait_count"].set(c["bait_count"]))
+
+    def buy_ready(self):
+        c = self.cfg
+        return None not in (c["pos_yes"], c["pos_amount"], c["pos_buy"], c["pos_dots"])
+
+    def need_bait(self):
+        c = self.cfg
+        return c["auto_buy"] and int(c["bait_count"]) <= int(c["buy_at"])
+
+    def buy_bait(self):
+        """E -> Yes -> caixa do número -> digita (cap - atual) -> Buy."""
+        c = self.cfg
+        if not self.buy_ready():
+            self.app.log("Marque os botões da compra primeiro ('Marcar botões').")
+            return False
+        if not self.roblox_focused():
+            self.app.log("Compra cancelada: o Roblox não está em foco.")
+            return False
+        amount = int(c["bait_cap"]) - int(c["bait_count"])
+        if amount <= 0:
+            self.app.log("Já está com o máximo de iscas.")
+            return False
+        self.app.status("Comprando iscas")
+        self.app.log(f"Comprando {amount} iscas comuns...")
+        self.mouse.release()
+        step = c["buy_step_s"]
+
+        def wait(s):
+            end = time.perf_counter() + s
+            while time.perf_counter() < end:
+                if self.quit or self.paused:
+                    raise InterruptedError
+                time.sleep(0.02)
+
+        try:
+            wait(0.3)
+            key_tap(c["interact_scan"])          # E
+            wait(step)
+            click_at(*c["pos_yes"])              # Yes
+            wait(step)
+            click_at(*c["pos_amount"])           # caixa do número
+            wait(0.3)
+            for _ in range(4):                   # limpa o "1" que vem por padrão
+                key_tap(SCAN_BACKSPACE)
+            type_number(amount)
+            wait(0.4)
+            click_at(*c["pos_buy"])              # Buy
+            wait(step)
+            click_at(*c["pos_dots"])             # "..." fecha o diálogo
+            wait(step)
+            if c["pos_fish"]:
+                move_to(*c["pos_fish"])          # volta pro ponto de pesca
+        except InterruptedError:
+            self.app.log("Compra interrompida.")
+            return False
+        c["bait_count"] = int(c["bait_cap"])
+        save_config(c)
+        self.app.post(lambda: self.app.fields["bait_count"].set(c["bait_count"]))
+        self.app.log("Compra feita.")
+        return True
+
     def run(self):
         while not self.quit:
             self.poll_keys()
+            if self.buy_requested:
+                self.buy_requested = False
+                self.app.log("Clique na janela do Roblox: a compra começa quando ela estiver em foco (5s).")
+                end = time.perf_counter() + 5
+                while not self.roblox_focused() and time.perf_counter() < end:
+                    time.sleep(0.05)
+                self.buy_bait()
+                self.app.status("Pescando" if self.running else "Desligado")
+            if self.active() and self.roblox_focused() and self.need_bait():
+                if not self.buy_bait():
+                    self.app.log("Não consegui comprar; desligando pra não gastar isca rara.")
+                    self.set_running(False)
+                    continue
             if not self.active() or not self.roblox_focused():
                 if self.active():
                     self.app.status("Esperando a janela do Roblox")
@@ -452,6 +590,7 @@ class App:
     def __init__(self):
         self.cfg = load_config()
         self.jobs = queue.Queue()
+        self.marking = None  # índice do passo do assistente de botões
         self.root = tk.Tk()
         self.root.title("GPO Autofish")
         self.root.attributes("-topmost", True)
@@ -494,14 +633,29 @@ class App:
         tk.Checkbutton(self.root, text="Inverter (segurar faz a zona descer)", variable=self.inv,
                        command=self.save_fields).pack(anchor="w", padx=10)
 
+        bait = tk.LabelFrame(self.root, text="Iscas comuns")
+        bait.pack(fill="x", **pad)
+        self.auto_buy = tk.BooleanVar(value=self.cfg["auto_buy"])
+        tk.Checkbutton(bait, text="Comprar automaticamente", variable=self.auto_buy,
+                       command=self.save_fields).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.spin(bait, "Iscas que tenho agora", "bait_count", 1, 1, integer=True, top=1000)
+        self.spin(bait, "Comprar quando restar", "buy_at", 2, 1, integer=True)
+        self.spin(bait, "Máximo (cap)", "bait_cap", 3, 1, integer=True, top=1000)
+        brow = tk.Frame(bait)
+        brow.grid(row=4, column=0, columnspan=2, pady=3)
+        self.mark_btn = tk.Button(brow, text="Marcar botões", width=14, command=self.start_marking)
+        self.mark_btn.pack(side="left", padx=2)
+        tk.Button(brow, text="Comprar agora", width=14,
+                  command=lambda: setattr(self.macro, "buy_requested", True)).pack(side="left", padx=2)
+
         tk.Button(self.root, text="Testar detecção (F8)", command=self.debug).pack(**pad)
         self.text = tk.Text(self.root, height=8, width=60, font=("Consolas", 8), state="disabled")
         self.text.pack(padx=10, pady=(3, 10))
 
-    def spin(self, parent, label, key, r, step):
+    def spin(self, parent, label, key, r, step, integer=False, top=100):
         tk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=6)
-        var = tk.DoubleVar(value=self.cfg[key])
-        sb = tk.Spinbox(parent, from_=0, to=100, increment=step, textvariable=var, width=8,
+        var = tk.IntVar(value=int(self.cfg[key])) if integer else tk.DoubleVar(value=self.cfg[key])
+        sb = tk.Spinbox(parent, from_=0, to=top, increment=step, textvariable=var, width=8,
                         command=self.save_fields)
         sb.grid(row=r, column=1, padx=6, pady=2)
         sb.bind("<FocusOut>", lambda e: self.save_fields())
@@ -513,11 +667,39 @@ class App:
     def save_fields(self):
         for key, var in self.fields.items():
             try:
-                self.cfg[key] = float(var.get())
+                self.cfg[key] = var.get()
             except (tk.TclError, ValueError):
                 pass
         self.cfg["invert"] = bool(self.inv.get())
+        self.cfg["auto_buy"] = bool(self.auto_buy.get())
         save_config(self.cfg)
+
+    # --- assistente pra marcar os botões da compra
+    MARK_STEPS = [
+        ("pos_yes", "Aperte E no jogo. Passe o mouse no botão YES e aperte F7."),
+        ("pos_amount", "Clique em Yes. Passe o mouse na CAIXA DO NÚMERO e aperte F7."),
+        ("pos_buy", "Passe o mouse no botão BUY e aperte F7. Depois clique em Buy (compre 1)."),
+        ("pos_dots", "Passe o mouse no botão '...' do fim do diálogo e aperte F7 (depois clique nele)."),
+        ("pos_fish", "Passe o mouse no PONTO ONDE VOCÊ PESCA (na água) e aperte F7."),
+    ]
+
+    def start_marking(self):
+        self.marking = 0
+        self.mark_btn.config(text="Marcando...")
+        self.log(self.MARK_STEPS[0][1])
+
+    def mark_next(self, pos):
+        key, _ = self.MARK_STEPS[self.marking]
+        self.cfg[key] = list(pos)
+        save_config(self.cfg)
+        self.log(f"  {key} = {pos}")
+        self.marking += 1
+        if self.marking < len(self.MARK_STEPS):
+            self.log(self.MARK_STEPS[self.marking][1])
+        else:
+            self.marking = None
+            self.mark_btn.config(text="Marcar botões")
+            self.log("Botões salvos! Teste com 'Comprar agora'.")
 
     # chamadas vindas da thread do macro rodam aqui (Tk só na thread principal)
     def post(self, fn):

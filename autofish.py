@@ -70,7 +70,16 @@ DEFAULT_CONFIG = {
     "pos_amount": None,
     "pos_buy": None,
     "pos_dots": None,         # botão "..." que fecha o diálogo depois da compra
-    "pos_fish": None,         # ponto onde o mouse fica pra pescar
+    "pos_fish": None,         # "lugar seguro": onde o mouse fica pra pescar
+
+    # Troca de iscas: usa na ordem lendária -> rara -> comum
+    "legendary_count": 0,
+    "rare_count": 0,
+    "active_bait": "common",  # isca selecionada no jogo agora
+    "pos_slot1": None,        # 1ª, 2ª e 3ª linha da lista "Fishing Baits"
+    "pos_slot2": None,
+    "pos_slot3": None,
+    "switch_step_s": 0.6,
     "buy_step_s": 0.9,        # espera entre cada passo da compra
     "interact_scan": 0x12,    # scan code da tecla E
 
@@ -154,6 +163,11 @@ def click_at(x, y):
     user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
     time.sleep(0.06)
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+
+BAIT_ORDER = ["legendary", "rare", "common"]   # ordem de uso = ordem na lista do jogo
+COUNT_KEY = {"legendary": "legendary_count", "rare": "rare_count", "common": "bait_count"}
+BAIT_NAMES = {"legendary": "Lendária", "rare": "Rara", "common": "Comum"}
 
 
 class Mouse:
@@ -492,9 +506,42 @@ class Macro(threading.Thread):
     # --- iscas
     def use_bait(self):
         c = self.cfg
-        c["bait_count"] = max(int(c["bait_count"]) - 1, 0)
+        key = COUNT_KEY.get(c["active_bait"], "bait_count")
+        c[key] = max(int(c[key]) - 1, 0)
         save_config(c)
-        self.app.post(lambda: self.app.fields["bait_count"].set(c["bait_count"]))
+        self.app.post(lambda: self.app.fields[key].set(c[key]))
+
+    def need_switch(self):
+        c = self.cfg
+        return int(c[COUNT_KEY.get(c["active_bait"], "bait_count")]) <= 0
+
+    def switch_bait(self):
+        """Seleciona a próxima isca (lendária -> rara -> comum) e volta o mouse pro lugar seguro."""
+        c = self.cfg
+        present = [b for b in BAIT_ORDER if int(c[COUNT_KEY[b]]) > 0]
+        if not present:
+            self.app.log("Acabaram todas as iscas.")
+            return False
+        nxt = present[0]
+        if nxt == c["active_bait"]:
+            return True
+        # cada isca fica sempre na mesma linha: lendária=1, rara=2, comum=3
+        slot = BAIT_ORDER.index(nxt) + 1
+        pos = c.get(f"pos_slot{slot}")
+        if pos is None:
+            self.app.log("Marque as linhas das iscas primeiro ('Marcar iscas').")
+            return False
+        self.app.status("Trocando isca")
+        self.app.log(f"Trocando para isca {BAIT_NAMES[nxt]} (linha {slot}).")
+        self.mouse.release()
+        click_at(*pos)
+        time.sleep(c["switch_step_s"])
+        if c["pos_fish"]:
+            move_to(*c["pos_fish"])
+        c["active_bait"] = nxt
+        save_config(c)
+        self.app.post(lambda: self.app.active_var.set(BAIT_NAMES[nxt]))
+        return True
 
     def buy_ready(self):
         c = self.cfg
@@ -572,6 +619,11 @@ class Macro(threading.Thread):
                     self.app.log("Não consegui comprar; desligando pra não gastar isca rara.")
                     self.set_running(False)
                     continue
+            if self.active() and self.roblox_focused() and self.need_switch():
+                if not self.switch_bait():
+                    self.app.log("Sem isca pra trocar; desligando.")
+                    self.set_running(False)
+                    continue
             if not self.active() or not self.roblox_focused():
                 if self.active():
                     self.app.status("Esperando a janela do Roblox")
@@ -643,10 +695,23 @@ class App:
         self.spin(bait, "Máximo (cap)", "bait_cap", 3, 1, integer=True, top=1000)
         brow = tk.Frame(bait)
         brow.grid(row=4, column=0, columnspan=2, pady=3)
-        self.mark_btn = tk.Button(brow, text="Marcar botões", width=14, command=self.start_marking)
+        self.mark_btn = tk.Button(brow, text="Marcar botões", width=14,
+                                  command=lambda: self.start_marking(self.MARK_STEPS))
         self.mark_btn.pack(side="left", padx=2)
         tk.Button(brow, text="Comprar agora", width=14,
                   command=lambda: setattr(self.macro, "buy_requested", True)).pack(side="left", padx=2)
+
+        sw = tk.LabelFrame(self.root, text="Troca de iscas (lendária → rara → comum)")
+        sw.pack(fill="x", **pad)
+        self.spin(sw, "Lendárias", "legendary_count", 0, 1, integer=True, top=1000)
+        self.spin(sw, "Raras", "rare_count", 1, 1, integer=True, top=1000)
+        tk.Label(sw, text="Usando agora no jogo").grid(row=2, column=0, sticky="w", padx=6)
+        self.active_var = tk.StringVar(value=BAIT_NAMES.get(self.cfg["active_bait"], "Comum"))
+        tk.OptionMenu(sw, self.active_var, *BAIT_NAMES.values(),
+                      command=lambda _: self.save_fields()).grid(row=2, column=1, padx=6, pady=2)
+        self.mark_bait_btn = tk.Button(sw, text="Marcar iscas", width=14,
+                                       command=lambda: self.start_marking(self.BAIT_STEPS))
+        self.mark_bait_btn.grid(row=3, column=0, columnspan=2, pady=3)
 
         tk.Button(self.root, text="Testar detecção (F8)", command=self.debug).pack(**pad)
         self.text = tk.Text(self.root, height=8, width=60, font=("Consolas", 8), state="disabled")
@@ -672,6 +737,8 @@ class App:
                 pass
         self.cfg["invert"] = bool(self.inv.get())
         self.cfg["auto_buy"] = bool(self.auto_buy.get())
+        names = {v: k for k, v in BAIT_NAMES.items()}
+        self.cfg["active_bait"] = names.get(self.active_var.get(), "common")
         save_config(self.cfg)
 
     # --- assistente pra marcar os botões da compra
@@ -680,26 +747,32 @@ class App:
         ("pos_amount", "Clique em Yes. Passe o mouse na CAIXA DO NÚMERO e aperte F7."),
         ("pos_buy", "Passe o mouse no botão BUY e aperte F7. Depois clique em Buy (compre 1)."),
         ("pos_dots", "Passe o mouse no botão '...' do fim do diálogo e aperte F7 (depois clique nele)."),
-        ("pos_fish", "Passe o mouse no PONTO ONDE VOCÊ PESCA (na água) e aperte F7."),
+        ("pos_fish", "Passe o mouse no LUGAR SEGURO onde você pesca (na água) e aperte F7."),
+    ]
+    # com as 3 iscas na lista (lendária, rara, comum)
+    BAIT_STEPS = [
+        ("pos_slot1", "Com as 3 iscas na lista: mouse na 1ª LINHA (Legendary) e aperte F7."),
+        ("pos_slot2", "Mouse na 2ª LINHA (Rare) e aperte F7."),
+        ("pos_slot3", "Mouse na 3ª LINHA (Common) e aperte F7."),
     ]
 
-    def start_marking(self):
+    def start_marking(self, steps):
+        self.mark_steps = steps
         self.marking = 0
-        self.mark_btn.config(text="Marcando...")
-        self.log(self.MARK_STEPS[0][1])
+        self.log(steps[0][1])
 
     def mark_next(self, pos):
-        key, _ = self.MARK_STEPS[self.marking]
+        steps = self.mark_steps
+        key, _ = steps[self.marking]
         self.cfg[key] = list(pos)
         save_config(self.cfg)
         self.log(f"  {key} = {pos}")
         self.marking += 1
-        if self.marking < len(self.MARK_STEPS):
-            self.log(self.MARK_STEPS[self.marking][1])
+        if self.marking < len(steps):
+            self.log(steps[self.marking][1])
         else:
             self.marking = None
-            self.mark_btn.config(text="Marcar botões")
-            self.log("Botões salvos! Teste com 'Comprar agora'.")
+            self.log("Posições salvas!")
 
     # chamadas vindas da thread do macro rodam aqui (Tk só na thread principal)
     def post(self, fn):

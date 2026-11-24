@@ -4,3 +4,6 @@ debug.png
 __pycache__/
 *.pyc
 .venv/
+build/
+dist/
+*.spec

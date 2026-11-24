@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import random
+import sys
 import threading
 import time
 import tkinter as tk
@@ -34,7 +35,11 @@ import mss
 import mss.tools
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# No .exe (PyInstaller) o config fica ao lado do executável, não na pasta temporária
+if getattr(sys, "frozen", False):
+    HERE = os.path.dirname(sys.executable)
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
 DEFAULT_CONFIG = {
